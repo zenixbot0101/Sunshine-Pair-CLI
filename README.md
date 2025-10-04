@@ -5,7 +5,7 @@
 A lightweight PowerShell script to manage pairing between
 Moonlight clients and a Sunshine host using Sunshine's REST API.
 
-Author: YOUR NAME
+Author: Dũng hoàng
 Repository: https://github.com/zenixbot0101/sunshine-pair-cli
 License: MIT
 
