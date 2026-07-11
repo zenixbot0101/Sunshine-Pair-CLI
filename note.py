@@ -200,28 +200,78 @@ def setup_vnc():
         "[VNC] Setup KDE VNC"
     )
 
+    # Earlier steps in this script write files into $HOME as root
+    # (Path.write_text, urlretrieve, etc). Make sure everything under
+    # $HOME is actually owned by the target user before VNC/X tools
+    # try to use it — several of the errors seen so far trace back to
+    # root-owned files sitting in the user's home directory.
     run(
-        f"su - {USER} -c 'mkdir -p ~/.vnc'"
+        f"chown -R {USER}:{USER} {HOME}",
+        silent=True
+    )
+
+    vnc_dir = f"{HOME}/.config/tigervnc"
+
+    # Newer TigerVNC (>=1.13) stores its config in ~/.config/tigervnc
+    # instead of ~/.vnc, and auto-migrates ~/.vnc there the first time
+    # vncserver runs. That migration breaks if ~/.config doesn't exist
+    # yet (fresh user account) or if ~/.config/tigervnc already exists
+    # partially from an earlier failed run of this script. Fix: wipe
+    # any leftover state and write straight into the new location, so
+    # there's nothing left for vncserver to "migrate".
+    run(
+        f"rm -rf {HOME}/.vnc {vnc_dir}",
+        silent=True
     )
 
     run(
-        f"su - {USER} -c 'vncpasswd'"
+        f"su - {USER} -c 'mkdir -p {vnc_dir}'"
+    )
+
+    # Plain `vncpasswd` needs a real tty (it uses ioctl to disable echo
+    # while you type). That fails with "Inappropriate ioctl for device"
+    # when this script runs from a notebook/non-interactive shell.
+    # Fix: read the password ourselves with getpass (works without a
+    # tty) and pipe it into `vncpasswd -f`, which reads plaintext from
+    # stdin and writes the obfuscated password file to stdout instead
+    # of prompting.
+    vnc_password = getpass.getpass(
+        "VNC password (min 6 chars): "
+    )
+
+    run(
+        f"su - {USER} -c 'vncpasswd -f > {vnc_dir}/passwd'",
+        input_data=vnc_password + "\n"
+    )
+
+    run(
+        f"chmod 600 {vnc_dir}/passwd"
+    )
+
+    run(
+        f"chown {USER}:{USER} {vnc_dir}/passwd"
     )
 
 
+    # Two fixes here, both needed for KDE Plasma to survive on TigerVNC:
+    # 1. `exec` instead of `startplasma-x11 &` — backgrounding makes
+    #    the xstartup script itself return immediately, which
+    #    vncserver treats as "session exited too early" and kills it.
+    #    `exec` replaces the shell process with Plasma so the script
+    #    never returns while the session is alive.
+    # 2. `dbus-launch --exit-with-session` — Plasma needs a D-Bus
+    #    session bus to start; without one it crashes within seconds.
     startup = """#!/bin/bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-startplasma-x11 &
+exec dbus-launch --exit-with-session startplasma-x11
 """
 
 
-    xstartup_path = f"{HOME}/.vnc/xstartup"
+    xstartup_path = f"{vnc_dir}/xstartup"
 
     Path(xstartup_path).write_text(startup)
 
-    # File was written as root (script runs via sudo) — hand ownership
-    # back to the target user so their VNC session can use/modify it.
     run(
         f"chown {USER}:{USER} {xstartup_path}"
     )
@@ -230,13 +280,32 @@ startplasma-x11 &
         f"chmod +x {xstartup_path}"
     )
 
+    # TigerVNC's vncserver wrapper calls `xauth` to set up X11 auth
+    # before it can start Xvnc. When this runs via `su - USER -c` from
+    # a root/notebook process, xauth sometimes can't create
+    # ~/.Xauthority itself (often because earlier root-owned writes
+    # into $HOME left it in a state xauth doesn't like), which makes
+    # the whole session exit within seconds. Pre-creating the file
+    # with the right owner sidesteps that entirely.
+    run(
+        f"su - {USER} -c 'touch ~/.Xauthority'"
+    )
+
+    run(
+        f"chown {USER}:{USER} {HOME}/.Xauthority"
+    )
+
+    run(
+        f"chmod 600 {HOME}/.Xauthority"
+    )
+
 
     # NOTE: do NOT pass "-xstartup startplasma-x11" here.
     # vncserver's -xstartup flag expects a *path to a script*, not a
     # command name. Passing a bare command breaks startup and silently
     # overrides the xstartup file we just wrote above. Leaving -xstartup
-    # out lets vncserver fall back to the default file at
-    # ~/.vnc/xstartup, which already runs startplasma-x11 correctly.
+    # out lets vncserver fall back to the default xstartup file, which
+    # already runs startplasma-x11 correctly.
     run(
         f"""
 su - {USER} -c '
@@ -247,6 +316,7 @@ vncserver :1 \
 '
 """
     )
+
 
 
 def setup_novnc():
