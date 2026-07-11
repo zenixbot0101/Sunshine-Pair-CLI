@@ -5,6 +5,7 @@
 import os
 import sys
 import time
+import re
 import subprocess
 import shutil
 import getpass
@@ -32,7 +33,7 @@ def out(msg):
     log(msg)
 
 
-def run(cmd, silent=False, input_data=None):
+def run(cmd, silent=False, input_data=None, fatal=True):
     try:
         if not silent:
             out(f">>> {cmd}")
@@ -55,11 +56,13 @@ def run(cmd, silent=False, input_data=None):
 
     except Exception as e:
         out("\n====================")
-        out("ERROR")
+        out("ERROR" if fatal else "WARNING (non-fatal, continuing)")
         out("====================")
         out(f"COMMAND:\n{cmd}")
         out(f"REASON:\n{e}")
-        sys.exit(1)
+        if fatal:
+            sys.exit(1)
+        return None
 
 
 def package_installed(pkg):
@@ -186,6 +189,7 @@ def install_base():
         "git",
         "chromium",
         "python3-pip",
+        "python3-psutil",
         "psmisc"
     ]
 
@@ -385,7 +389,7 @@ https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-l
         "apt install -y /tmp/cloudflared.deb",
         silent=True
     )
-def start_cloudflare(service, port):
+def start_cloudflare(service, port, scheme="http", no_tls_verify=False):
 
     out(
         f"[CLOUDFLARE] Starting {service}:{port}"
@@ -393,11 +397,13 @@ def start_cloudflare(service, port):
 
     log_file = f"{HOME}/{service}-cloudflare.log"
 
+    tls_flag = "--no-tls-verify " if no_tls_verify else ""
+
     run(
         f"""
 su - {USER} -c '
-nohup cloudflared tunnel \
---url http://localhost:{port} \
+nohup cloudflared tunnel {tls_flag}\
+--url {scheme}://localhost:{port} \
 > {log_file} 2>&1 &
 '
 """
@@ -513,16 +519,27 @@ mkdir -p ~/.local/share/wallpapers
 
 cp {file} \
 ~/.local/share/wallpapers/wallpaper.png
-
-plasma-apply-wallpaperimage \
-~/.local/share/wallpapers/wallpaper.png
 '
 """
     )
 
+    # Applying the wallpaper live requires talking to the already
+    # running Plasma session over D-Bus/X11. This is a fresh shell
+    # (separate from the VNC session's environment), so it doesn't
+    # automatically know DISPLAY or the right D-Bus session bus —
+    # setting DISPLAY=:1 covers the common case, but this can still
+    # fail depending on timing. It's purely cosmetic (the file is
+    # already copied in place above and can be set manually from
+    # System Settings), so a failure here shouldn't abort the whole
+    # install.
+    run(
+        f"su - {USER} -c 'DISPLAY=:1 plasma-apply-wallpaperimage ~/.local/share/wallpapers/wallpaper.png'",
+        fatal=False
+    )
 
 
-def create_monitor():
+
+def create_monitor(urls):
 
     out(
         "[MONITOR] Creating app monitor"
@@ -536,6 +553,7 @@ def create_monitor():
 import psutil
 import time
 import subprocess
+import os
 from datetime import datetime
 
 
@@ -547,6 +565,32 @@ apps={
 "Xtigervnc":"TigerVNC",
 "web-server":"Moonlight"
 }
+
+
+URLS_FILE = os.path.expanduser("~/.cloudgaming_urls")
+
+
+def load_urls():
+
+    entries = []
+
+    if os.path.exists(URLS_FILE):
+
+        with open(URLS_FILE) as f:
+
+            for line in f:
+
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                parts = line.split("|")
+
+                if len(parts) == 4:
+                    entries.append(parts)
+
+    return entries
 
 
 while True:
@@ -571,6 +615,22 @@ while True:
     print(
         f"UPTIME: {h}h {m}m"
     )
+
+
+    print("\nACCESS URLS\n")
+
+    entries = load_urls()
+
+    if entries:
+
+        for label, url, port, local_scheme in entries:
+
+            print(f"{label:<22} {url}")
+            print(f"{'':<22} (local: {local_scheme}://localhost:{port})")
+
+    else:
+
+        print("(chua co tunnel nao san sang)")
 
 
     print("\nAPPLICATION STATUS\n")
@@ -645,25 +705,23 @@ while True:
         pass
 
 
+    print("\n(Ctrl+C thoat monitor - cac dich vu van chay ngam)")
+
+
     time.sleep(10)
 '''
 
     Path(monitor).write_text(code)
 
-
     run(
         f"chown {USER}:{USER} {monitor}"
     )
 
-
-    run(
-        f"""
-su - {USER} -c '
-nohup python3 ~/cloud-monitor.py \
-> ~/monitor.log 2>&1 &
-'
-"""
-    )
+    # URLs are saved separately by get_cloudflare_urls() into
+    # ~/.cloudgaming_urls, which the monitor script above reads on
+    # every refresh — so it stays correct even though this function
+    # doesn't launch the monitor itself (main() does that in the
+    # foreground as the final step).
 
 
 
@@ -675,26 +733,58 @@ def get_cloudflare_urls():
 
     time.sleep(5)
 
+    # label -> (log file prefix, local port, is displayed as https)
+    services = {
+        "noVNC (VNC Desktop)": ("novnc", 6001, False),
+        "Moonlight Web":       ("moonlight-web", 8081, False),
+        "Sunshine":            ("sunshine", 47990, True),
+    }
 
-    logs=[
-        "novnc-cloudflare.log",
-        "moonlight-web-cloudflare.log"
+    urls = {}
+
+    for label, (prefix, port, is_https) in services.items():
+
+        path = f"{HOME}/{prefix}-cloudflare.log"
+
+        if not os.path.exists(path):
+            continue
+
+        data = open(path).read()
+
+        match = re.search(
+            r"https://[-a-zA-Z0-9]+\.trycloudflare\.com",
+            data
+        )
+
+        if match:
+            urls[label] = {
+                "url": match.group(),
+                "port": port,
+                "local_scheme": "https" if is_https else "http"
+            }
+
+    # Save for the monitor script to pick up (it runs as a separate
+    # process, so it can't just read this dict from memory).
+    lines = [
+        f"{label}|{info['url']}|{info['port']}|{info['local_scheme']}"
+        for label, info in urls.items()
     ]
 
+    urls_file = f"{HOME}/.cloudgaming_urls"
 
-    for l in logs:
+    Path(urls_file).write_text("\n".join(lines))
 
-        path=f"{HOME}/{l}"
+    run(
+        f"chown {USER}:{USER} {urls_file}",
+        silent=True
+    )
 
-        if os.path.exists(path):
+    if not urls:
+        out(
+            "Chưa lấy được URL Cloudflare nào (tunnel có thể cần thêm vài giây)."
+        )
 
-            data=open(path).read()
-
-            for line in data.splitlines():
-
-                if "trycloudflare.com" in line:
-
-                    print(line)
+    return urls
 
 
 
@@ -744,7 +834,7 @@ curl -u admin:admin \
 
 
 
-def final_report():
+def final_report(urls):
 
     print("""
 
@@ -764,8 +854,31 @@ Services:
 [OK] Chromium
 [OK] Cloudflare Tunnel
 
+""")
 
-Logs:
+    if urls:
+
+        print("ACCESS URLS:\n")
+
+        for label, info in urls.items():
+
+            print(
+                f"  {label:<22} {info['url']}"
+            )
+            print(
+                f"  {'':<22} (local: {info['local_scheme']}://localhost:{info['port']})"
+            )
+
+        print()
+
+    else:
+
+        print(
+            "(Chưa lấy được URL Cloudflare — kiểm tra lại các file "
+            "*-cloudflare.log trong thư mục home)\n"
+        )
+
+    print("""Logs:
 
 /var/log/cloudgaming.log
 
@@ -778,6 +891,25 @@ Monitor:
 ========================================
 
 """)
+
+
+def run_monitor_foreground():
+
+    out(
+        "\n[MONITOR] Starting live dashboard "
+        "(Ctrl+C to exit — services keep running in the background)\n"
+    )
+
+    time.sleep(1)
+
+    # Replaces this process with the monitor running as the target
+    # user, in the foreground, attached to the current terminal — so
+    # it stays open and visible instead of silently dying in a log
+    # file like the old nohup version did.
+    os.execvp(
+        "su",
+        ["su", "-", USER, "-c", f"python3 {HOME}/cloud-monitor.py"]
+    )
 
 
 def main():
@@ -817,22 +949,36 @@ def main():
     setup_sunshine()
 
 
+    # Sunshine's web UI is HTTPS-only (self-signed cert), so the
+    # tunnel has to point at https:// with TLS verification disabled —
+    # pointing cloudflared at http:// here (as before) would just fail
+    # to connect.
     start_cloudflare(
         "sunshine",
-        47990
+        47990,
+        scheme="https",
+        no_tls_verify=True
     )
 
 
     setup_wallpaper()
 
-    create_monitor()
+    urls = get_cloudflare_urls()
+
+    create_monitor(urls)
 
 
-    final_report()
+    final_report(urls)
 
 
-    # MUST BE LAST
+    # MUST run before the monitor takes over the terminal below
     moonlight_pair()
+
+    # Final step: hand the terminal over to the live dashboard. This
+    # never returns (Ctrl+C to stop watching) — the actual services
+    # (VNC, noVNC, Sunshine, Moonlight Web, cloudflared tunnels) were
+    # all started with nohup earlier and keep running independently.
+    run_monitor_foreground()
 
 
 
