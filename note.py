@@ -32,7 +32,7 @@ def out(msg):
     log(msg)
 
 
-def run(cmd, silent=False):
+def run(cmd, silent=False, input_data=None):
     try:
         if not silent:
             out(f">>> {cmd}")
@@ -40,6 +40,7 @@ def run(cmd, silent=False):
         result = subprocess.run(
             cmd,
             shell=True,
+            input=input_data,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
