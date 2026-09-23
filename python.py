@@ -1,4 +1,4 @@
-__obfuscated_by__ = 'https://pyobfuscate.com'
+__obfuscated_by__ = 'dunghoang'
 globals()['lIIllIIIl'] = lambda *a: ''.join(map(chr, [x ^ 28 for x in a]))
 globals()['IIIIIIllIl'] = getattr(__builtins__, lIIllIIIl(67, 67, 120, 117, 127, 104, 67, 67), __builtins__)
 IIllIlIIlllII = IIIIIIllIl[lIIllIIIl(113, 125, 108)]
