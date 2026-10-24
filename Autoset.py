@@ -362,9 +362,34 @@ def kill_pattern(*args):
     )
 
 
+# Ports that must NEVER be touched — Jupyter Lab runs here
+_PROTECTED_PORTS = {8888}
+
+
+def kill_port(port, proto="tcp"):
+    """
+    Kill whatever process is listening on *port*, unless it is a
+    protected port (Jupyter Lab = 8888).  Uses fuser which is part of
+    the psmisc package installed in install_base().
+    """
+    if port in _PROTECTED_PORTS:
+        out(f"[CLEANUP] Skipping port {port} (protected)")
+        return
+    subprocess.run(
+        ["fuser", "-k", f"{port}/{proto}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def cleanup_old():
     out("[CLEANUP] Dừng các tiến trình từ lần chạy trước")
+    out(f"[CLEANUP] Port {sorted(_PROTECTED_PORTS)} được bảo vệ (Jupyter) — không đụng vào")
 
+    # ── Kill by process name / cmdline ────────────────────────────────────────
+    # NOTE: never add patterns that could match Jupyter (jupyter, ipython,
+    # ipykernel, kernel-*.json, port 8888).  Each entry below is scoped
+    # to services we install.
     kill_pattern("-f", "pinggy.io")
     kill_pattern("-f", "cloudflared")
     kill_pattern("-f", "sleep 86400")
@@ -374,10 +399,26 @@ def cleanup_old():
     kill_pattern("-f", "web-server --bind-address")
     kill_pattern("-x", "streamer")
     kill_pattern("-x", "sunshine")
-    kill_pattern("-f", "chrome-remote-desktop")  # stop old CRD daemon
-    kill_pattern("-f", "warpdesk")               # stop old WarpDesk agent
-    kill_pattern("-x", "kworker-ui")             # stop old RustDesk stealth process
+    kill_pattern("-f", "chrome-remote-desktop")
+    kill_pattern("-f", "warpdesk")
+    kill_pattern("-x", "kworker-ui")
+    kill_pattern("-f", "code-server")          # VS Code Web (mode 2)
+    kill_pattern("-x", "hbbs")                 # RustDesk ID server
+    kill_pattern("-x", "hbbr")                 # RustDesk relay
 
+    # ── Kill by port (skips protected ports automatically) ────────────────────
+    for port in [
+        5901,   # TigerVNC
+        6001,   # noVNC
+        7681,   # ttyd web terminal
+        8081,   # Moonlight Web
+        8080,   # VS Code Web (code-server)
+        47990,  # Sunshine HTTPS
+        21115, 21116, 21117, 21118, 21119,  # RustDesk self-hosted
+    ]:
+        kill_port(port)
+
+    # ── Kill VNC server cleanly first, then force-kill X ──────────────────────
     run(f"su - {USER} -c 'vncserver -kill :1'", silent=True, fatal=False)
     time.sleep(2)
 
